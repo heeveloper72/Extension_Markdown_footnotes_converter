@@ -1,42 +1,12 @@
 // 티스토리 각주 변환기 - 콘텐츠 스크립트
-// 마지막으로 포커스된 편집 가능 요소를 추적하여 각주를 탐지/변환합니다.
 
 (function () {
   'use strict';
 
-  // ─── 마지막 포커스 요소 추적 ───
-
-  let lastFocusedElement = null;
-
-  document.addEventListener('focusin', (e) => {
-    const el = e.target;
-    if (
-      el.tagName === 'TEXTAREA' ||
-      (el.tagName === 'INPUT' && el.type === 'text') ||
-      el.getAttribute('contenteditable') === 'true' ||
-      el.closest('.CodeMirror') ||
-      el.closest('.cm-editor')
-    ) {
-      lastFocusedElement = el;
-    }
-  }, true);
-
-  // click 이벤트도 추적 (일부 에디터는 focusin이 안 올 수 있음)
-  document.addEventListener('click', (e) => {
-    const el = e.target;
-    if (
-      el.tagName === 'TEXTAREA' ||
-      el.getAttribute('contenteditable') === 'true' ||
-      el.closest('.CodeMirror') ||
-      el.closest('.cm-editor')
-    ) {
-      lastFocusedElement = el;
-    }
-  }, true);
-
-  // ─── Page Bridge 통신 (CodeMirror 전용) ───
+  // ─── Page Bridge 통신 ───
 
   let bridgeInjected = false;
+  let bridgeReady = false;
   let requestId = 0;
   const pendingRequests = new Map();
 
@@ -70,13 +40,17 @@
       const id = ++requestId;
       const timeout = setTimeout(() => {
         pendingRequests.delete(id);
-        reject(new Error('CodeMirror 접근 시간 초과'));
+        reject(new Error('에디터 접근 시간 초과 — 페이지를 새로고침 후 다시 시도해주세요.'));
       }, 5000);
 
       pendingRequests.set(id, (resp) => {
         clearTimeout(timeout);
         if (resp.error) {
-          reject(new Error(resp.error));
+          reject(new Error(
+            resp.error === 'EDITOR_NOT_FOUND'
+              ? '에디터를 찾을 수 없습니다. HTML 편집 모드인지 확인해주세요.'
+              : resp.error
+          ));
         } else {
           resolve(resp);
         }
@@ -86,53 +60,117 @@
     });
   }
 
+  // ─── Tistory 에디터 감지 (DOM 조회, content script에서 가능) ───
+
+  function detectTistoryEditor() {
+    // HTML 모드: .cm-s-tistory-html 요소가 visible
+    const cmEl = document.querySelector('.cm-s-tistory-html');
+    if (cmEl && cmEl.offsetParent !== null) return 'tistory-cm5';
+
+    // .ReactCodemirror 컨테이너가 표시 중이고 내부에 .CodeMirror 있음
+    const reactCm = document.querySelector('.ReactCodemirror');
+    if (reactCm && window.getComputedStyle(reactCm).display !== 'none') {
+      if (reactCm.querySelector('.CodeMirror')) return 'tistory-cm5';
+    }
+
+    // 비주얼 모드: #editor-tistory_ifr가 visible
+    const tinyFrame = document.querySelector('#editor-tistory_ifr');
+    if (tinyFrame && tinyFrame.offsetParent !== null) return 'tistory-tinymce';
+
+    return null;
+  }
+
   // ─── 에디터 콘텐츠 읽기/쓰기 ───
+
+  // 폴백용: 마지막 포커스 요소 추적
+  let lastFocusedElement = null;
+
+  document.addEventListener('focusin', (e) => {
+    const el = e.target;
+    if (
+      el.tagName === 'TEXTAREA' ||
+      (el.tagName === 'INPUT' && el.type === 'text') ||
+      el.getAttribute('contenteditable') === 'true' ||
+      el.closest('.CodeMirror') ||
+      el.closest('.cm-editor')
+    ) {
+      lastFocusedElement = el;
+    }
+  }, true);
+
+  document.addEventListener('click', (e) => {
+    const el = e.target;
+    if (
+      el.tagName === 'TEXTAREA' ||
+      el.getAttribute('contenteditable') === 'true' ||
+      el.closest('.CodeMirror') ||
+      el.closest('.cm-editor')
+    ) {
+      lastFocusedElement = el;
+    }
+  }, true);
+
+  async function getBridgeContent() {
+    injectBridge();
+    // 브릿지 스크립트 로드 대기 (최초 주입 시 필요)
+    await new Promise((r) => setTimeout(r, 200));
+    const resp = await sendToBridge('getValue');
+    return { type: resp.editorType || 'bridge', content: resp.data };
+  }
+
+  async function setBridgeContent(newContent) {
+    injectBridge();
+    await new Promise((r) => setTimeout(r, 200));
+    await sendToBridge('setValue', newContent);
+  }
 
   function resolveEditorElement() {
     const el = lastFocusedElement;
     if (!el) return null;
 
-    // textarea
-    const textarea = el.tagName === 'TEXTAREA' ? el : el.closest && el.closest('textarea');
-    if (textarea) {
-      return { type: 'textarea', element: textarea };
-    }
+    // CodeMirror 래퍼 내부 → bridge 위임
+    const cmWrapper = (el.closest && el.closest('.CodeMirror')) ||
+                      (el.closest && el.closest('.cm-editor'));
+    if (cmWrapper) return { type: 'codemirror' };
 
-    // contenteditable
+    // contenteditable 직접 접근
     if (el.getAttribute && el.getAttribute('contenteditable') === 'true') {
       return { type: 'contenteditable', element: el };
     }
     const editableParent = el.closest && el.closest('[contenteditable="true"]');
-    if (editableParent) {
-      return { type: 'contenteditable', element: editableParent };
-    }
+    if (editableParent) return { type: 'contenteditable', element: editableParent };
 
-    // CodeMirror 래퍼 내부 요소
-    const cmWrapper = (el.closest && el.closest('.CodeMirror')) || (el.closest && el.closest('.cm-editor'));
-    if (cmWrapper) {
-      return { type: 'codemirror', element: cmWrapper };
+    // textarea: Tistory CM5의 hidden textarea는 제외 (CM5가 아닌 순수 textarea만)
+    if (el.tagName === 'TEXTAREA') {
+      // CM 내부 textarea는 제외
+      if (!el.closest('.CodeMirror') && !el.closest('.cm-editor')) {
+        return { type: 'textarea', element: el };
+      }
     }
 
     return null;
   }
 
   async function getContent() {
+    // 1순위: Tistory 에디터 자동 감지 → 항상 bridge 사용
+    const tistoryMode = detectTistoryEditor();
+    if (tistoryMode) {
+      return await getBridgeContent();
+    }
+
+    // 2순위: lastFocusedElement 기반 폴백
     const editor = resolveEditorElement();
     if (!editor) return null;
 
     switch (editor.type) {
-      case 'textarea':
-        return { type: 'textarea', content: editor.element.value };
+      case 'codemirror':
+        return await getBridgeContent();
 
       case 'contenteditable':
         return { type: 'contenteditable', content: editor.element.innerHTML };
 
-      case 'codemirror': {
-        injectBridge();
-        await new Promise((r) => setTimeout(r, 150));
-        const resp = await sendToBridge('getValue');
-        return { type: 'codemirror', content: resp.data };
-      }
+      case 'textarea':
+        return { type: 'textarea', content: editor.element.value };
 
       default:
         return null;
@@ -140,14 +178,20 @@
   }
 
   async function setContent(newContent) {
+    // 1순위: Tistory 에디터 자동 감지 → 항상 bridge 사용
+    const tistoryMode = detectTistoryEditor();
+    if (tistoryMode) {
+      await setBridgeContent(newContent);
+      return true;
+    }
+
+    // 2순위: lastFocusedElement 기반 폴백
     const editor = resolveEditorElement();
     if (!editor) return false;
 
     switch (editor.type) {
-      case 'textarea':
-        editor.element.value = newContent;
-        editor.element.dispatchEvent(new Event('input', { bubbles: true }));
-        editor.element.dispatchEvent(new Event('change', { bubbles: true }));
+      case 'codemirror':
+        await setBridgeContent(newContent);
         return true;
 
       case 'contenteditable':
@@ -155,12 +199,11 @@
         editor.element.dispatchEvent(new Event('input', { bubbles: true }));
         return true;
 
-      case 'codemirror': {
-        injectBridge();
-        await new Promise((r) => setTimeout(r, 150));
-        await sendToBridge('setValue', newContent);
+      case 'textarea':
+        editor.element.value = newContent;
+        editor.element.dispatchEvent(new Event('input', { bubbles: true }));
+        editor.element.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
-      }
 
       default:
         return false;
@@ -262,7 +305,7 @@
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleMessage(message).then(sendResponse);
-    return true; // 비동기 응답
+    return true;
   });
 
   async function handleMessage(message) {
@@ -272,7 +315,7 @@
       if (!editorData) {
         return {
           error: 'editor_not_found',
-          message: '편집 가능한 텍스트 영역을 찾을 수 없습니다.\nHTML 편집기를 클릭한 후 다시 시도해주세요.',
+          message: '편집기를 찾을 수 없습니다.\n티스토리 HTML 편집 모드인지 확인해주세요.',
         };
       }
 

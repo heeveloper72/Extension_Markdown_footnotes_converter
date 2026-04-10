@@ -1,24 +1,49 @@
-// 티스토리 각주 변환기 - 페이지 컨텍스트 브릿지 (CodeMirror 전용)
-// Content script의 isolated world에서 접근 불가한 CodeMirror 인스턴스에 접근합니다.
+// 티스토리 각주 변환기 - 페이지 컨텍스트 브릿지
+// Content script의 isolated world에서 접근 불가한 에디터 인스턴스에 접근합니다.
+// 우선순위: Tistory CM5 → Tistory TinyMCE → 범용 CM5 → 범용 CM6
 
 (function () {
   'use strict';
 
-  function getCodeMirror() {
-    // CodeMirror 5
+  function getEditor() {
+    // 1. Tistory HTML 모드: .cm-s-tistory-html (CodeMirror 5)
+    const tCm = document.querySelector('.cm-s-tistory-html');
+    if (tCm && tCm.CodeMirror) {
+      return {
+        type: 'tistory-cm5',
+        getValue: () => tCm.CodeMirror.getValue(),
+        setValue: (v) => tCm.CodeMirror.setValue(v),
+      };
+    }
+
+    // 2. Tistory 비주얼 모드: TinyMCE
+    if (typeof tinymce !== 'undefined') {
+      const tinyEditor = tinymce.get('editor-tistory');
+      if (tinyEditor) {
+        return {
+          type: 'tistory-tinymce',
+          getValue: () => tinyEditor.getContent(),
+          setValue: (v) => tinyEditor.setContent(v),
+        };
+      }
+    }
+
+    // 3. 범용 CodeMirror 5 폴백
     const cm5 = document.querySelector('.CodeMirror');
     if (cm5 && cm5.CodeMirror) {
       return {
+        type: 'cm5',
         getValue: () => cm5.CodeMirror.getValue(),
         setValue: (v) => cm5.CodeMirror.setValue(v),
       };
     }
 
-    // CodeMirror 6
+    // 4. 범용 CodeMirror 6 폴백
     const cm6 = document.querySelector('.cm-editor');
     if (cm6 && cm6.cmView && cm6.cmView.view) {
       const view = cm6.cmView.view;
       return {
+        type: 'cm6',
         getValue: () => view.state.doc.toString(),
         setValue: (v) => {
           view.dispatch({
@@ -36,11 +61,11 @@
     if (!event.data || event.data.type !== 'TISTORY_FN_REQUEST') return;
 
     const { id, action, value } = event.data;
-    const cm = getCodeMirror();
+    const editor = getEditor();
 
-    if (!cm) {
+    if (!editor) {
       window.postMessage(
-        { type: 'TISTORY_FN_RESPONSE', id, data: null, error: 'CM_NOT_FOUND' },
+        { type: 'TISTORY_FN_RESPONSE', id, data: null, editorType: null, error: 'EDITOR_NOT_FOUND' },
         '*'
       );
       return;
@@ -51,15 +76,15 @@
 
     try {
       if (action === 'getValue') {
-        data = cm.getValue();
+        data = editor.getValue();
       } else if (action === 'setValue') {
-        cm.setValue(value);
+        editor.setValue(value);
         data = true;
       }
     } catch (e) {
       error = e.message;
     }
 
-    window.postMessage({ type: 'TISTORY_FN_RESPONSE', id, data, error }, '*');
+    window.postMessage({ type: 'TISTORY_FN_RESPONSE', id, data, editorType: editor.type, error }, '*');
   });
 })();
