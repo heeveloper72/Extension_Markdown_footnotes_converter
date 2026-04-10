@@ -1,11 +1,40 @@
 // 티스토리 각주 변환기 - 콘텐츠 스크립트
-// isolated world에서 실행됩니다.
-// CodeMirror 등 페이지 JS 객체 접근은 page-bridge.js를 통해 수행합니다.
+// 마지막으로 포커스된 편집 가능 요소를 추적하여 각주를 탐지/변환합니다.
 
 (function () {
   'use strict';
 
-  // ─── Page Bridge 통신 ───
+  // ─── 마지막 포커스 요소 추적 ───
+
+  let lastFocusedElement = null;
+
+  document.addEventListener('focusin', (e) => {
+    const el = e.target;
+    if (
+      el.tagName === 'TEXTAREA' ||
+      (el.tagName === 'INPUT' && el.type === 'text') ||
+      el.getAttribute('contenteditable') === 'true' ||
+      el.closest('.CodeMirror') ||
+      el.closest('.cm-editor')
+    ) {
+      lastFocusedElement = el;
+    }
+  }, true);
+
+  // click 이벤트도 추적 (일부 에디터는 focusin이 안 올 수 있음)
+  document.addEventListener('click', (e) => {
+    const el = e.target;
+    if (
+      el.tagName === 'TEXTAREA' ||
+      el.getAttribute('contenteditable') === 'true' ||
+      el.closest('.CodeMirror') ||
+      el.closest('.cm-editor')
+    ) {
+      lastFocusedElement = el;
+    }
+  }, true);
+
+  // ─── Page Bridge 통신 (CodeMirror 전용) ───
 
   let bridgeInjected = false;
   let requestId = 0;
@@ -41,15 +70,13 @@
       const id = ++requestId;
       const timeout = setTimeout(() => {
         pendingRequests.delete(id);
-        reject(new Error('페이지 브릿지 응답 시간 초과'));
+        reject(new Error('CodeMirror 접근 시간 초과'));
       }, 5000);
 
       pendingRequests.set(id, (resp) => {
         clearTimeout(timeout);
         if (resp.error) {
-          reject(new Error(resp.error === 'EDITOR_NOT_FOUND'
-            ? 'HTML 편집기를 찾을 수 없습니다. HTML 편집 모드인지 확인해주세요.'
-            : resp.error));
+          reject(new Error(resp.error));
         } else {
           resolve(resp);
         }
@@ -57,6 +84,87 @@
 
       window.postMessage({ type: 'TISTORY_FN_REQUEST', id, action, value }, '*');
     });
+  }
+
+  // ─── 에디터 콘텐츠 읽기/쓰기 ───
+
+  function resolveEditorElement() {
+    const el = lastFocusedElement;
+    if (!el) return null;
+
+    // textarea
+    const textarea = el.tagName === 'TEXTAREA' ? el : el.closest && el.closest('textarea');
+    if (textarea) {
+      return { type: 'textarea', element: textarea };
+    }
+
+    // contenteditable
+    if (el.getAttribute && el.getAttribute('contenteditable') === 'true') {
+      return { type: 'contenteditable', element: el };
+    }
+    const editableParent = el.closest && el.closest('[contenteditable="true"]');
+    if (editableParent) {
+      return { type: 'contenteditable', element: editableParent };
+    }
+
+    // CodeMirror 래퍼 내부 요소
+    const cmWrapper = (el.closest && el.closest('.CodeMirror')) || (el.closest && el.closest('.cm-editor'));
+    if (cmWrapper) {
+      return { type: 'codemirror', element: cmWrapper };
+    }
+
+    return null;
+  }
+
+  async function getContent() {
+    const editor = resolveEditorElement();
+    if (!editor) return null;
+
+    switch (editor.type) {
+      case 'textarea':
+        return { type: 'textarea', content: editor.element.value };
+
+      case 'contenteditable':
+        return { type: 'contenteditable', content: editor.element.innerHTML };
+
+      case 'codemirror': {
+        injectBridge();
+        await new Promise((r) => setTimeout(r, 150));
+        const resp = await sendToBridge('getValue');
+        return { type: 'codemirror', content: resp.data };
+      }
+
+      default:
+        return null;
+    }
+  }
+
+  async function setContent(newContent) {
+    const editor = resolveEditorElement();
+    if (!editor) return false;
+
+    switch (editor.type) {
+      case 'textarea':
+        editor.element.value = newContent;
+        editor.element.dispatchEvent(new Event('input', { bubbles: true }));
+        editor.element.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+
+      case 'contenteditable':
+        editor.element.innerHTML = newContent;
+        editor.element.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+
+      case 'codemirror': {
+        injectBridge();
+        await new Promise((r) => setTimeout(r, 150));
+        await sendToBridge('setValue', newContent);
+        return true;
+      }
+
+      default:
+        return false;
+    }
   }
 
   // ─── 각주 탐지 ───
@@ -153,58 +261,56 @@
   // ─── 메시지 리스너 ───
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    injectBridge();
-
-    // 브릿지가 로드될 약간의 시간을 줌
-    setTimeout(() => {
-      handleMessage(message, sendResponse);
-    }, 100);
-
+    handleMessage(message).then(sendResponse);
     return true; // 비동기 응답
   });
 
-  async function handleMessage(message, sendResponse) {
+  async function handleMessage(message) {
     try {
-      const resp = await sendToBridge('getValue');
-      const html = resp.data;
-      const editorType = resp.editorType;
+      const editorData = await getContent();
+
+      if (!editorData) {
+        return {
+          error: 'editor_not_found',
+          message: '편집 가능한 텍스트 영역을 찾을 수 없습니다.\nHTML 편집기를 클릭한 후 다시 시도해주세요.',
+        };
+      }
+
+      const html = editorData.content;
 
       switch (message.action) {
         case 'scan': {
           const result = detectFootnotePairs(html);
-          sendResponse({
+          return {
             pairs: result.pairs,
             alreadyProcessed: result.alreadyProcessed,
-            editorType,
+            editorType: editorData.type,
             totalPairs: result.pairs.length,
-          });
-          break;
+          };
         }
 
         case 'convertOne': {
           const num = message.number;
           const newHtml = convertSingleFootnote(html, num);
-          await sendToBridge('setValue', newHtml);
-          sendResponse({ success: true, number: num });
-          break;
+          await setContent(newHtml);
+          return { success: true, number: num };
         }
 
         case 'convertAll': {
           const result = detectFootnotePairs(html);
           const newHtml = convertAllFootnotes(html);
-          await sendToBridge('setValue', newHtml);
-          sendResponse({ success: true, count: result.pairs.length });
-          break;
+          await setContent(newHtml);
+          return { success: true, count: result.pairs.length };
         }
 
         default:
-          sendResponse({ error: 'unknown_action', message: `알 수 없는 액션: ${message.action}` });
+          return { error: 'unknown_action', message: `알 수 없는 액션: ${message.action}` };
       }
     } catch (err) {
-      sendResponse({
-        error: 'bridge_error',
+      return {
+        error: 'content_error',
         message: err.message,
-      });
+      };
     }
   }
 })();
