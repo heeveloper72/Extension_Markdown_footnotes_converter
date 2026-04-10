@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <h1>각주 변환기</h1>
+
+    <!-- 초기 상태: 스캔 버튼 -->
+    <div id="view-scan" class="view">
+      <p class="desc">티스토리 HTML 편집기에서 각주 패턴을 찾아 양방향 링크를 부여합니다.</p>
+      <button id="btn-scan" class="btn btn-primary">각주 스캔</button>
+    </div>
+
+    <!-- 스캔 중 -->
+    <div id="view-loading" class="view hidden">
+      <div class="spinner"></div>
+      <p>스캔 중...</p>
+    </div>
+
+    <!-- 에러 -->
+    <div id="view-error" class="view hidden">
+      <p class="error-msg" id="error-text"></p>
+      <button id="btn-retry" class="btn btn-secondary">다시 시도</button>
+    </div>
+
+    <!-- 각주 없음 -->
+    <div id="view-empty" class="view hidden">
+      <p class="info-msg" id="empty-text"></p>
+      <button id="btn-close-empty" class="btn btn-secondary">닫기</button>
+    </div>
+
+    <!-- 각주 확인 대화 -->
+    <div id="view-confirm" class="view hidden">
+      <div class="progress-bar">
+        <span id="progress-text"></span>
+      </div>
+      <div class="preview-box">
+        <div class="preview-label">본문:</div>
+        <div class="preview-content" id="preview-body"></div>
+        <div class="preview-label">각주:</div>
+        <div class="preview-content" id="preview-foot"></div>
+      </div>
+      <p class="confirm-question">이 각주에 링크를 달까요?</p>
+      <div class="btn-group">
+        <button id="btn-all" class="btn btn-primary"></button>
+        <button id="btn-yes" class="btn btn-success">네</button>
+        <button id="btn-no" class="btn btn-secondary">아니요</button>
+      </div>
+    </div>
+
+    <!-- 완료 -->
+    <div id="view-done" class="view hidden">
+      <p class="success-msg" id="done-text"></p>
+      <button id="btn-close-done" class="btn btn-secondary">닫기</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
