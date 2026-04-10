@@ -1,130 +1,70 @@
 // 티스토리 각주 변환기 - 콘텐츠 스크립트
-// 티스토리 HTML 편집기의 콘텐츠에 접근하여 각주 패턴을 탐지하고 변환합니다.
+// isolated world에서 실행됩니다.
+// CodeMirror 등 페이지 JS 객체 접근은 page-bridge.js를 통해 수행합니다.
 
 (function () {
   'use strict';
 
-  // ─── 에디터 접근 ───
+  // ─── Page Bridge 통신 ───
 
-  function getEditorAccess() {
-    // 1. CodeMirror 6
-    const cm6El = document.querySelector('.cm-editor');
-    if (cm6El) {
-      const view = cm6El.cmView && cm6El.cmView.view;
-      if (view) {
-        return {
-          type: 'cm6',
-          getContent: () => view.state.doc.toString(),
-          setContent: (text) => {
-            view.dispatch({
-              changes: { from: 0, to: view.state.doc.length, insert: text },
-            });
-          },
-        };
-      }
+  let bridgeInjected = false;
+  let requestId = 0;
+  const pendingRequests = new Map();
+
+  function injectBridge() {
+    if (bridgeInjected) return;
+    if (document.getElementById('tistory-fn-bridge')) {
+      bridgeInjected = true;
+      return;
     }
+    const script = document.createElement('script');
+    script.id = 'tistory-fn-bridge';
+    script.src = chrome.runtime.getURL('content/page-bridge.js');
+    (document.head || document.documentElement).appendChild(script);
+    bridgeInjected = true;
+  }
 
-    // 2. CodeMirror 5
-    const cm5El = document.querySelector('.CodeMirror');
-    if (cm5El && cm5El.CodeMirror) {
-      const cm = cm5El.CodeMirror;
-      return {
-        type: 'cm5',
-        getContent: () => cm.getValue(),
-        setContent: (text) => cm.setValue(text),
-      };
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (!event.data || event.data.type !== 'TISTORY_FN_RESPONSE') return;
+
+    const { id } = event.data;
+    const resolver = pendingRequests.get(id);
+    if (resolver) {
+      pendingRequests.delete(id);
+      resolver(event.data);
     }
+  });
 
-    // 3. textarea 폴백 (여러 셀렉터 시도)
-    const textareaSelectors = [
-      '#content',
-      'textarea[name="content"]',
-      '.html-mode textarea',
-      '.editor-html textarea',
-      '#editor-html textarea',
-      'textarea.html-editor',
-      'textarea',
-    ];
-    for (const sel of textareaSelectors) {
-      const textarea = document.querySelector(sel);
-      if (textarea && textarea.tagName === 'TEXTAREA') {
-        return {
-          type: 'textarea',
-          getContent: () => textarea.value,
-          setContent: (text) => {
-            textarea.value = text;
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            textarea.dispatchEvent(new Event('change', { bubbles: true }));
-          },
-        };
-      }
-    }
+  function sendToBridge(action, value) {
+    return new Promise((resolve, reject) => {
+      const id = ++requestId;
+      const timeout = setTimeout(() => {
+        pendingRequests.delete(id);
+        reject(new Error('페이지 브릿지 응답 시간 초과'));
+      }, 5000);
 
-    // 4. contenteditable 폴백
-    const editableSelectors = [
-      '.html-mode [contenteditable="true"]',
-      '.editor-html [contenteditable="true"]',
-      '[contenteditable="true"]',
-    ];
-    for (const sel of editableSelectors) {
-      const editable = document.querySelector(sel);
-      if (editable) {
-        return {
-          type: 'contenteditable',
-          getContent: () => editable.innerHTML,
-          setContent: (text) => {
-            editable.innerHTML = text;
-            editable.dispatchEvent(new Event('input', { bubbles: true }));
-          },
-        };
-      }
-    }
-
-    // 5. iframe 내부 에디터 탐색
-    const iframes = document.querySelectorAll('iframe');
-    for (const iframe of iframes) {
-      try {
-        const iDoc = iframe.contentDocument || iframe.contentWindow.document;
-        const iTextarea = iDoc.querySelector('textarea');
-        if (iTextarea) {
-          return {
-            type: 'iframe-textarea',
-            getContent: () => iTextarea.value,
-            setContent: (text) => {
-              iTextarea.value = text;
-              iTextarea.dispatchEvent(new Event('input', { bubbles: true }));
-              iTextarea.dispatchEvent(new Event('change', { bubbles: true }));
-            },
-          };
+      pendingRequests.set(id, (resp) => {
+        clearTimeout(timeout);
+        if (resp.error) {
+          reject(new Error(resp.error === 'EDITOR_NOT_FOUND'
+            ? 'HTML 편집기를 찾을 수 없습니다. HTML 편집 모드인지 확인해주세요.'
+            : resp.error));
+        } else {
+          resolve(resp);
         }
-        const iEditable = iDoc.querySelector('[contenteditable="true"]');
-        if (iEditable) {
-          return {
-            type: 'iframe-contenteditable',
-            getContent: () => iEditable.innerHTML,
-            setContent: (text) => {
-              iEditable.innerHTML = text;
-              iEditable.dispatchEvent(new Event('input', { bubbles: true }));
-            },
-          };
-        }
-      } catch (e) {
-        // cross-origin iframe — skip
-      }
-    }
+      });
 
-    return null;
+      window.postMessage({ type: 'TISTORY_FN_REQUEST', id, action, value }, '*');
+    });
   }
 
   // ─── 각주 탐지 ───
 
-  // 본문 각주 패턴: <a href="#_ftnN">[N]</a> (아직 id="_ftnref" 없는 것)
   const BODY_FOOTNOTE_RE = /<a\s+href="#_ftn(\d+)">\[(\d+)\]<\/a>/g;
-  // 하단 각주 패턴: <p><a href="#_ftnrefN"> (아직 <p id="_ftn"> 없는 것)
   const FOOT_DEFINITION_RE = /<p><a\s+href="#_ftnref(\d+)">/g;
 
   function detectFootnotePairs(html) {
-    // 이미 처리된 경우
     if (html.includes('id="_ftnref')) {
       return { pairs: [], alreadyProcessed: true };
     }
@@ -132,7 +72,6 @@
     const bodyMatches = {};
     const footMatches = {};
 
-    // 본문 각주 참조 수집
     let m;
     BODY_FOOTNOTE_RE.lastIndex = 0;
     while ((m = BODY_FOOTNOTE_RE.exec(html)) !== null) {
@@ -144,7 +83,6 @@
       bodyMatches[num] = { fullMatch, context, index: m.index };
     }
 
-    // 하단 각주 정의 수집
     FOOT_DEFINITION_RE.lastIndex = 0;
     while ((m = FOOT_DEFINITION_RE.exec(html)) !== null) {
       const num = m[1];
@@ -152,14 +90,12 @@
       const start = m.index;
       const end = Math.min(html.length, m.index + 100);
       const snippet = html.substring(start, end);
-      // </p> 또는 다음 줄까지 잘라서 컨텍스트 추출
       const pEnd = snippet.indexOf('</p>');
       const contextRaw = pEnd > 0 ? snippet.substring(0, pEnd) : snippet;
       const context = contextRaw.replace(/<[^>]*>/g, '').trim();
       footMatches[num] = { fullMatch, context, index: m.index };
     }
 
-    // 본문+하단 쌍 매칭
     const pairs = [];
     for (const num of Object.keys(bodyMatches).sort((a, b) => +a - +b)) {
       if (footMatches[num]) {
@@ -179,7 +115,6 @@
   function convertSingleFootnote(html, number) {
     const n = number;
 
-    // 본문: <a href="#_ftnN">[N]</a> → <sup><a id="_ftnrefN" href="#_ftnN">[N]</a></sup>
     const bodyRe = new RegExp(
       `<a\\s+href="#_ftn${n}">\\[${n}\\]</a>`,
       'g'
@@ -189,7 +124,6 @@
       `<sup><a id="_ftnref${n}" href="#_ftn${n}">[${n}]</a></sup>`
     );
 
-    // 하단: <p><a href="#_ftnrefN"> → <p id="_ftnN"><a href="#_ftnrefN">
     const footRe = new RegExp(
       `<p><a href="#_ftnref${n}">`,
       'g'
@@ -203,13 +137,11 @@
   }
 
   function convertAllFootnotes(html) {
-    // 본문 각주 일괄 변환
     html = html.replace(
       /<a\s+href="#_ftn(\d+)">\[(\d+)\]<\/a>/g,
       '<sup><a id="_ftnref$1" href="#_ftn$1">[$2]</a></sup>'
     );
 
-    // 하단 각주 일괄 변환
     html = html.replace(
       /<p><a href="#_ftnref(\d+)">/g,
       '<p id="_ftn$1"><a href="#_ftnref$1">'
@@ -221,50 +153,58 @@
   // ─── 메시지 리스너 ───
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    const editor = getEditorAccess();
+    injectBridge();
 
-    if (!editor) {
-      sendResponse({
-        error: 'editor_not_found',
-        message: 'HTML 편집기를 찾을 수 없습니다. HTML 편집 모드인지 확인해주세요.',
-      });
-      return true;
-    }
+    // 브릿지가 로드될 약간의 시간을 줌
+    setTimeout(() => {
+      handleMessage(message, sendResponse);
+    }, 100);
 
-    const html = editor.getContent();
-
-    switch (message.action) {
-      case 'scan': {
-        const result = detectFootnotePairs(html);
-        sendResponse({
-          pairs: result.pairs,
-          alreadyProcessed: result.alreadyProcessed,
-          editorType: editor.type,
-          totalPairs: result.pairs.length,
-        });
-        break;
-      }
-
-      case 'convertOne': {
-        const num = message.number;
-        const newHtml = convertSingleFootnote(html, num);
-        editor.setContent(newHtml);
-        sendResponse({ success: true, number: num });
-        break;
-      }
-
-      case 'convertAll': {
-        const newHtml = convertAllFootnotes(html);
-        editor.setContent(newHtml);
-        const result = detectFootnotePairs(html);
-        sendResponse({ success: true, count: result.pairs.length });
-        break;
-      }
-
-      default:
-        sendResponse({ error: 'unknown_action', message: `알 수 없는 액션: ${message.action}` });
-    }
-
-    return true;
+    return true; // 비동기 응답
   });
+
+  async function handleMessage(message, sendResponse) {
+    try {
+      const resp = await sendToBridge('getValue');
+      const html = resp.data;
+      const editorType = resp.editorType;
+
+      switch (message.action) {
+        case 'scan': {
+          const result = detectFootnotePairs(html);
+          sendResponse({
+            pairs: result.pairs,
+            alreadyProcessed: result.alreadyProcessed,
+            editorType,
+            totalPairs: result.pairs.length,
+          });
+          break;
+        }
+
+        case 'convertOne': {
+          const num = message.number;
+          const newHtml = convertSingleFootnote(html, num);
+          await sendToBridge('setValue', newHtml);
+          sendResponse({ success: true, number: num });
+          break;
+        }
+
+        case 'convertAll': {
+          const result = detectFootnotePairs(html);
+          const newHtml = convertAllFootnotes(html);
+          await sendToBridge('setValue', newHtml);
+          sendResponse({ success: true, count: result.pairs.length });
+          break;
+        }
+
+        default:
+          sendResponse({ error: 'unknown_action', message: `알 수 없는 액션: ${message.action}` });
+      }
+    } catch (err) {
+      sendResponse({
+        error: 'bridge_error',
+        message: err.message,
+      });
+    }
+  }
 })();
