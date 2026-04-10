@@ -213,8 +213,8 @@
   // ─── 각주 탐지 ───
 
   const BODY_FOOTNOTE_RE = /<a\s+href="#_ftn(\d+)">\[(\d+)\]<\/a>/g;
-  // <p>에 data-ke-size 같은 속성이 붙을 수 있으므로 [^>]* 로 처리
-  const FOOT_DEFINITION_RE = /<p[^>]*><a\s+href="#_ftnref(\d+)">/g;
+  // 각주 정의의 back-link <a> 태그 매칭 (<p> 래퍼에 의존하지 않음)
+  const FOOT_DEFINITION_RE = /<a\s+href="#_ftnref(\d+)">/g;
 
   // 개별 각주 N번이 이미 변환되었는지 확인
   function isFootnoteConverted(html, num) {
@@ -287,12 +287,9 @@
       `<sup><a id="_ftnref${n}" href="#_ftn${n}">[${n}]</a></sup>`
     );
 
-    // <p> 태그에 data-ke-size 등 속성이 있을 수 있으므로 속성 보존, id를 앞에 배치
-    const footRe = new RegExp(`<p([^>]*)><a href="#_ftnref${n}">`, 'g');
-    html = html.replace(
-      footRe,
-      (match, attrs) => `<p id="_ftn${n}"${attrs}><a href="#_ftnref${n}">`
-    );
+    // 각주 정의 <a> 태그에 id 부여 (앵커 타겟)
+    const footRe = new RegExp(`<a\\s+href="#_ftnref${n}">`, 'g');
+    html = html.replace(footRe, `<a id="_ftn${n}" href="#_ftnref${n}">`);
 
     return html;
   }
@@ -303,10 +300,10 @@
       '<sup><a id="_ftnref$1" href="#_ftn$1">[$2]</a></sup>'
     );
 
-    // <p> 태그에 data-ke-size 등 속성이 있을 수 있으므로 속성 보존, id를 앞에 배치
+    // 각주 정의 <a> 태그에 id 부여 (앵커 타겟)
     html = html.replace(
-      /<p([^>]*)><a href="#_ftnref(\d+)">/g,
-      (match, attrs, n) => `<p id="_ftn${n}"${attrs}><a href="#_ftnref${n}">`
+      /<a\s+href="#_ftnref(\d+)">/g,
+      '<a id="_ftn$1" href="#_ftnref$1">'
     );
 
     return html;
