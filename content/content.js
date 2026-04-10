@@ -216,18 +216,24 @@
   // <p>에 data-ke-size 같은 속성이 붙을 수 있으므로 [^>]* 로 처리
   const FOOT_DEFINITION_RE = /<p[^>]*><a\s+href="#_ftnref(\d+)">/g;
 
-  function detectFootnotePairs(html) {
-    if (html.includes('id="_ftnref')) {
-      return { pairs: [], alreadyProcessed: true };
-    }
+  // 개별 각주 N번이 이미 변환되었는지 확인
+  function isFootnoteConverted(html, num) {
+    return html.includes(`id="_ftnref${num}"`);
+  }
 
+  function detectFootnotePairs(html) {
     const bodyMatches = {};
     const footMatches = {};
 
+    // 아직 변환되지 않은 본문 각주만 수집
+    // 변환 전: <a href="#_ftnN">[N]</a>  (id 없음)
+    // 변환 후: <sup><a id="_ftnrefN" href="#_ftnN">[N]</a></sup>
     let m;
     BODY_FOOTNOTE_RE.lastIndex = 0;
     while ((m = BODY_FOOTNOTE_RE.exec(html)) !== null) {
       const num = m[1];
+      // 이미 변환된 각주는 건너뜀
+      if (isFootnoteConverted(html, num)) continue;
       const fullMatch = m[0];
       const start = Math.max(0, m.index - 30);
       const end = Math.min(html.length, m.index + fullMatch.length + 30);
@@ -238,6 +244,7 @@
     FOOT_DEFINITION_RE.lastIndex = 0;
     while ((m = FOOT_DEFINITION_RE.exec(html)) !== null) {
       const num = m[1];
+      if (isFootnoteConverted(html, num)) continue;
       const fullMatch = m[0];
       const start = m.index;
       const end = Math.min(html.length, m.index + 100);
@@ -259,7 +266,11 @@
       }
     }
 
-    return { pairs, alreadyProcessed: false };
+    const alreadyProcessed = pairs.length === 0 &&
+      BODY_FOOTNOTE_RE.test(html) === false &&
+      html.includes('id="_ftnref');
+
+    return { pairs, alreadyProcessed };
   }
 
   // ─── 각주 변환 ───
@@ -276,11 +287,11 @@
       `<sup><a id="_ftnref${n}" href="#_ftn${n}">[${n}]</a></sup>`
     );
 
-    // <p> 태그에 data-ke-size 등 속성이 있을 수 있으므로 속성 보존
+    // <p> 태그에 data-ke-size 등 속성이 있을 수 있으므로 속성 보존, id를 앞에 배치
     const footRe = new RegExp(`<p([^>]*)><a href="#_ftnref${n}">`, 'g');
     html = html.replace(
       footRe,
-      (match, attrs) => `<p${attrs} id="_ftn${n}"><a href="#_ftnref${n}">`
+      (match, attrs) => `<p id="_ftn${n}"${attrs}><a href="#_ftnref${n}">`
     );
 
     return html;
@@ -292,10 +303,10 @@
       '<sup><a id="_ftnref$1" href="#_ftn$1">[$2]</a></sup>'
     );
 
-    // <p> 태그에 data-ke-size 등 속성이 있을 수 있으므로 속성 보존
+    // <p> 태그에 data-ke-size 등 속성이 있을 수 있으므로 속성 보존, id를 앞에 배치
     html = html.replace(
       /<p([^>]*)><a href="#_ftnref(\d+)">/g,
-      (match, attrs, n) => `<p${attrs} id="_ftn${n}"><a href="#_ftnref${n}">`
+      (match, attrs, n) => `<p id="_ftn${n}"${attrs}><a href="#_ftnref${n}">`
     );
 
     return html;
