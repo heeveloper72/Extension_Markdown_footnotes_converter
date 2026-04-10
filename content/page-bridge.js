@@ -12,7 +12,15 @@
       return {
         type: 'tistory-cm5',
         getValue: () => tCm.CodeMirror.getValue(),
-        setValue: (v) => tCm.CodeMirror.setValue(v),
+        setValue: (v) => {
+          // replaceRange로 변경해야 에디터가 dirty 상태를 인식함
+          // (setValue는 히스토리 초기화 + markClean 호출로 변경 감지 안 됨)
+          const cm = tCm.CodeMirror;
+          cm.operation(() => {
+            const last = cm.lastLine();
+            cm.replaceRange(v, {line: 0, ch: 0}, {line: last, ch: cm.getLine(last).length});
+          });
+        },
       };
     }
 
@@ -34,7 +42,13 @@
       return {
         type: 'cm5',
         getValue: () => cm5.CodeMirror.getValue(),
-        setValue: (v) => cm5.CodeMirror.setValue(v),
+        setValue: (v) => {
+          const cm = cm5.CodeMirror;
+          cm.operation(() => {
+            const last = cm.lastLine();
+            cm.replaceRange(v, {line: 0, ch: 0}, {line: last, ch: cm.getLine(last).length});
+          });
+        },
       };
     }
 

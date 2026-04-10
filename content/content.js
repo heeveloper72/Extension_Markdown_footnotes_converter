@@ -212,7 +212,8 @@
 
   // ─── 각주 탐지 ───
 
-  const BODY_FOOTNOTE_RE = /<a\s+href="#_ftn(\d+)">\[(\d+)\]<\/a>/g;
+  // [N]이 <span> 태그로 중첩 래핑될 수 있음: <a href="#_ftn1"><span><span>[1]</span></span></a>
+  const BODY_FOOTNOTE_RE = /<a\s+href="#_ftn(\d+)">((?:<span[^>]*>)*\[\d+\](?:<\/span>)*)<\/a>/g;
   // 각주 정의의 back-link <a> 태그 매칭 (<p> 래퍼에 의존하지 않음)
   const FOOT_DEFINITION_RE = /<a\s+href="#_ftnref(\d+)">/g;
 
@@ -279,12 +280,12 @@
     const n = number;
 
     const bodyRe = new RegExp(
-      `<a\\s+href="#_ftn${n}">\\[${n}\\]</a>`,
+      `<a\\s+href="#_ftn${n}">((?:<span[^>]*>)*\\[${n}\\](?:<\\/span>)*)<\\/a>`,
       'g'
     );
     html = html.replace(
       bodyRe,
-      `<sup><a id="_ftnref${n}" href="#_ftn${n}">[${n}]</a></sup>`
+      `<sup><a id="_ftnref${n}" href="#_ftn${n}">$1</a></sup>`
     );
 
     // 각주 정의 <a> 태그에 id 부여 (앵커 타겟)
@@ -295,9 +296,10 @@
   }
 
   function convertAllFootnotes(html) {
+    // [N]이 <span> 태그로 중첩 래핑될 수 있으므로 내부 콘텐츠($2) 보존
     html = html.replace(
-      /<a\s+href="#_ftn(\d+)">\[(\d+)\]<\/a>/g,
-      '<sup><a id="_ftnref$1" href="#_ftn$1">[$2]</a></sup>'
+      /<a\s+href="#_ftn(\d+)">((?:<span[^>]*>)*\[\d+\](?:<\/span>)*)<\/a>/g,
+      '<sup><a id="_ftnref$1" href="#_ftn$1">$2</a></sup>'
     );
 
     // 각주 정의 <a> 태그에 id 부여 (앵커 타겟)
