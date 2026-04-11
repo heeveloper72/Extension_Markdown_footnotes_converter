@@ -42,6 +42,7 @@
     switch (format) {
       case 'word': return 'Word';
       case 'markdown': return 'Markdown';
+      case 'plaintext': return 'Plain [N]';
       case 'mixed': return 'Word+Markdown';
       default: return '';
     }

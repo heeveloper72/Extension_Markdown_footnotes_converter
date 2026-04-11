@@ -236,6 +236,11 @@
     if (hasWord) return 'word';
     if (hasMarkdown) return 'markdown';
     if (hasRendered) return 'rendered';
+
+    // 평문 [N] 감지 — 클러스터 기반 (티스토리가 [^N]을 [N]으로 변환한 경우)
+    var ptCluster = detectPlainTextCluster(cleaned);
+    if (ptCluster && ptCluster.definitions.size >= 2) return 'plaintext';
+
     return null;
   }
 
@@ -546,6 +551,193 @@
     return restoreProtectedZones(text, zones);
   }
 
+  // ─── 평문 [N] 각주 — 클러스터 기반 탐지 ───
+
+  /**
+   * 문서 하단에서 <p>[N]  내용</p> 형태의 정의 클러스터를 찾는다.
+   * 반환: { definitions: Map<number, {index, content}>, clusterStart, numbers } 또는 null
+   */
+  function detectPlainTextCluster(html) {
+    // 정의 패턴: <p> 다음에 [N]과 2개 이상 공백 (티스토리가 [^N]: 를 변환한 결과)
+    var defRe = /<p[^>]*>\[(\d+)\]\s{2,}/g;
+    var defs = [];
+    var m;
+    while ((m = defRe.exec(html)) !== null) {
+      var num = parseInt(m[1], 10);
+      // 정의 내용 추출 (</p>까지)
+      var afterIdx = m.index + m[0].length;
+      var rest = html.substring(afterIdx);
+      var pEnd = rest.indexOf('</p>');
+      var rawContent = pEnd >= 0 ? rest.substring(0, pEnd) : rest.substring(0, 100);
+      var content = rawContent.replace(/<[^>]*>/g, '').trim();
+      defs.push({ num: num, index: m.index, content: content });
+    }
+
+    if (defs.length < 2) return null;
+
+    // 클러스터 검증: 모든 정의가 문서 후반부에 모여있는지
+    var docLen = html.length;
+    var clusterStart = defs[0].index;
+    // 클러스터는 문서 50% 이후에 시작해야 함
+    if (clusterStart < docLen * 0.3) return null;
+
+    // 번호 집합 완전성 검증: 1부터 max까지 빠짐 없이 존재
+    var numbers = new Set();
+    for (var i = 0; i < defs.length; i++) {
+      numbers.add(defs[i].num);
+    }
+    var maxNum = 0;
+    numbers.forEach(function (n) { if (n > maxNum) maxNum = n; });
+
+    // 1~max 사이에 빠진 번호가 있으면 클러스터가 아닐 가능성
+    var missing = [];
+    for (var n = 1; n <= maxNum; n++) {
+      if (!numbers.has(n)) missing.push(n);
+    }
+    // 빠진 번호가 전체의 20% 이상이면 클러스터가 아닌 것으로 판단
+    if (missing.length > maxNum * 0.2) return null;
+
+    var definitions = new Map();
+    for (var j = 0; j < defs.length; j++) {
+      definitions.set(defs[j].num, { index: defs[j].index, content: defs[j].content });
+    }
+
+    return { definitions: definitions, clusterStart: clusterStart, numbers: numbers, maxNum: maxNum, missing: missing };
+  }
+
+  /**
+   * 평문 [N] 각주 쌍 탐지
+   */
+  function detectPlainTextPairs(html) {
+    var result = stripProtectedZones(html);
+    var cleaned = result.cleaned;
+
+    var cluster = detectPlainTextCluster(cleaned);
+    if (!cluster || cluster.definitions.size < 2) {
+      return { pairs: [], alreadyProcessed: false, format: null };
+    }
+
+    // 이미 변환 완료 확인
+    if (cleaned.includes('id="_ftnref')) {
+      return { pairs: [], alreadyProcessed: true, format: 'plaintext' };
+    }
+
+    // 본문 참조 탐지: 클러스터 시작 이전 영역에서 [N] 찾기
+    // <p> 직후가 아닌 위치 (정의와 구분)
+    var bodyArea = cleaned.substring(0, cluster.clusterStart);
+    var bodyRefs = {};
+    // [N] 패턴 — <p> 직후나 줄 시작이 아닌 곳에서만 (본문 참조)
+    var refRe = /\[(\d+)\]/g;
+    var rm;
+    while ((rm = refRe.exec(bodyArea)) !== null) {
+      var rNum = parseInt(rm[1], 10);
+      // 클러스터에 정의가 있는 번호만 채택
+      if (!cluster.definitions.has(rNum)) continue;
+      // <p> 직후인지 확인 (정의 패턴 배제)
+      var before = bodyArea.substring(Math.max(0, rm.index - 20), rm.index);
+      if (/<p[^>]*>\s*$/.test(before)) continue;
+
+      if (!bodyRefs[rNum]) {
+        var start = Math.max(0, rm.index - 30);
+        var end = Math.min(bodyArea.length, rm.index + rm[0].length + 30);
+        var ctx = bodyArea.substring(start, end).replace(/<[^>]*>/g, '').trim();
+        bodyRefs[rNum] = { index: rm.index, context: ctx };
+      }
+    }
+
+    // 쌍 생성
+    var pairs = [];
+    var nums = [];
+    cluster.definitions.forEach(function (val, key) { nums.push(key); });
+    nums.sort(function (a, b) { return a - b; });
+
+    for (var i = 0; i < nums.length; i++) {
+      var n = nums[i];
+      var def = cluster.definitions.get(n);
+      var bodyRef = bodyRefs[n];
+
+      pairs.push({
+        number: n,
+        bodyContext: bodyRef ? bodyRef.context : '(본문 참조 미발견)',
+        footContext: '[' + n + ']  ' + def.content,
+        hasBodyRef: !!bodyRef,
+      });
+    }
+
+    // 고아 정보
+    var orphanDefs = [];
+    for (var oi = 0; oi < nums.length; oi++) {
+      if (!bodyRefs[nums[oi]]) orphanDefs.push(String(nums[oi]));
+    }
+
+    return {
+      pairs: pairs,
+      alreadyProcessed: false,
+      format: 'plaintext',
+      cluster: cluster,
+      orphanRefs: [],
+      orphanDefs: orphanDefs,
+    };
+  }
+
+  // ─── 평문 [N] 각주 변환 ───
+
+  function convertSinglePlainTextFootnote(html, number) {
+    var n = number;
+
+    // 클러스터를 다시 찾아서 정확한 위치에서 변환
+    var cluster = detectPlainTextCluster(html);
+    if (!cluster) return html;
+
+    // 1. 본문 참조 변환: 클러스터 이전 영역의 [N] → <sup><a ...>[N]</a></sup>
+    var bodyArea = html.substring(0, cluster.clusterStart);
+    var replaced = false;
+    var bodyResult = bodyArea.replace(/\[(\d+)\]/g, function (match, numStr, offset) {
+      if (replaced) return match;
+      if (parseInt(numStr, 10) !== n) return match;
+      // <p> 직후 배제
+      var before = bodyArea.substring(Math.max(0, offset - 20), offset);
+      if (/<p[^>]*>\s*$/.test(before)) return match;
+      replaced = true;
+      return '<sup><a id="_ftnref' + n + '" href="#_ftn' + n + '">[' + n + ']</a></sup>';
+    });
+
+    // 2. 정의 변환: <p>[N]  → <p><a id="_ftn...">[N]</a>
+    var footArea = html.substring(cluster.clusterStart);
+    var defRe = new RegExp('<p([^>]*)>\\[' + n + '\\](\\s{2,})', 'g');
+    footArea = footArea.replace(defRe, function (match, attrs, spaces) {
+      return '<p' + attrs + '><a id="_ftn' + n + '" href="#_ftnref' + n + '">[' + n + ']</a>' + spaces;
+    });
+
+    return bodyResult + footArea;
+  }
+
+  function convertAllPlainTextFootnotes(html, scanResult) {
+    var cluster = scanResult.cluster;
+    if (!cluster) return html;
+
+    // 1. 본문 참조 일괄 변환
+    var bodyArea = html.substring(0, cluster.clusterStart);
+    bodyArea = bodyArea.replace(/\[(\d+)\]/g, function (match, numStr, offset) {
+      var num = parseInt(numStr, 10);
+      if (!cluster.definitions.has(num)) return match;
+      // <p> 직후 배제
+      var before = bodyArea.substring(Math.max(0, offset - 20), offset);
+      if (/<p[^>]*>\s*$/.test(before)) return match;
+      return '<sup><a id="_ftnref' + num + '" href="#_ftn' + num + '">[' + num + ']</a></sup>';
+    });
+
+    // 2. 정의 일괄 변환
+    var footArea = html.substring(cluster.clusterStart);
+    footArea = footArea.replace(/<p([^>]*)>\[(\d+)\](\s{2,})/g, function (match, attrs, numStr, spaces) {
+      var num = parseInt(numStr, 10);
+      if (!cluster.definitions.has(num)) return match;
+      return '<p' + attrs + '><a id="_ftn' + num + '" href="#_ftnref' + num + '">[' + num + ']</a>' + spaces;
+    });
+
+    return bodyArea + footArea;
+  }
+
   // ─── 스캔 결과 저장 (format-aware dispatch에 사용) ───
 
   var lastScanResult = null;
@@ -628,6 +820,10 @@
             scanResult = wResult;
             scanResult.format = 'word';
             lastScanResult = { format: 'word' };
+          } else if (format === 'plaintext') {
+            var ptResult = detectPlainTextPairs(html);
+            scanResult = ptResult;
+            lastScanResult = { format: 'plaintext', cluster: ptResult.cluster, pairs: ptResult.pairs };
           } else {
             scanResult = { pairs: [], alreadyProcessed: false, format: null };
             lastScanResult = null;
@@ -666,6 +862,8 @@
             } else {
               newHtml = convertSingleMarkdownFootnote(html, pair.label, num);
             }
+          } else if (lastScanResult.format === 'plaintext') {
+            newHtml = convertSinglePlainTextFootnote(html, num);
           } else if (lastScanResult.format === 'mixed') {
             var isWordPair = false;
             var wordPairs = (lastScanResult.wordResult && lastScanResult.wordResult.pairs) || [];
@@ -711,6 +909,9 @@
             totalCount = wRes.pairs.length;
           } else if (lastScanResult.format === 'markdown') {
             allHtml = convertAllMarkdownFootnotes(allHtml, lastScanResult);
+            totalCount = lastScanResult.pairs.length;
+          } else if (lastScanResult.format === 'plaintext') {
+            allHtml = convertAllPlainTextFootnotes(allHtml, lastScanResult);
             totalCount = lastScanResult.pairs.length;
           } else if (lastScanResult.format === 'mixed') {
             allHtml = convertAllFootnotes(allHtml);
