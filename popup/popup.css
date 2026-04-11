@@ -162,6 +162,28 @@ h1 {
   margin-top: 4px;
 }
 
+/* 고아 경고 */
+.orphan-warning {
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #e65100;
+  line-height: 1.4;
+}
+
+.format-badge {
+  display: inline-block;
+  background: #e3f2fd;
+  color: #1565c0;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  margin-left: 6px;
+}
+
 /* 메시지 */
 .error-msg {
   color: #e74c3c;
