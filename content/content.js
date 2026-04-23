@@ -3,6 +3,11 @@
 (function () {
   'use strict';
 
+  // ─── 중복 실행 방지 ───
+  // popup이 executeScript로 재주입할 때 리스너 중복 등록 방지
+  if (window.__tistoryFnConverterLoaded) return;
+  window.__tistoryFnConverterLoaded = true;
+
   // ─── Page Bridge 통신 ───
 
   let bridgeInjected = false;
@@ -742,6 +747,66 @@
 
   var lastScanResult = null;
 
+  // ─── 마크다운 편집 모드 감지 ───
+
+  function isLikelyRawMarkdown(content) {
+    if (!content || content.length < 10) return false;
+    // 티스토리 HTML 모드는 반드시 <p 태그를 포함
+    var hasPTag = /<p[\s>]/.test(content);
+    var hasDivTag = /<div[\s>]/.test(content);
+    if (hasPTag || hasDivTag) return false;
+    // 마크다운 특유 패턴 확인
+    var mdIndicators = 0;
+    if (/^#{1,6}\s/m.test(content)) mdIndicators++;
+    if (/\[.+\]\(.+\)/.test(content)) mdIndicators++;
+    if (/^\s*[-*]\s/m.test(content)) mdIndicators++;
+    if (/^\s*\d+\.\s/m.test(content)) mdIndicators++;
+    if (/```/.test(content)) mdIndicators++;
+    return mdIndicators >= 1;
+  }
+
+  // ─── 변환 결과 검증 ───
+
+  function verifyConversion(html) {
+    var issues = [];
+
+    var ftnrefRe = /id="_ftnref(\d+)"/g;
+    var ftnRe = /id="_ftn(\d+)"/g;
+    var refNums = new Set();
+    var defNums = new Set();
+
+    var m;
+    while ((m = ftnrefRe.exec(html)) !== null) refNums.add(m[1]);
+    while ((m = ftnRe.exec(html)) !== null) defNums.add(m[1]);
+
+    refNums.forEach(function (n) {
+      if (!defNums.has(n)) issues.push('[' + n + '] 본문 참조 O, 정의 X');
+    });
+    defNums.forEach(function (n) {
+      if (!refNums.has(n)) issues.push('[' + n + '] 정의 O, 본문 참조 X');
+    });
+
+    // target 속성 자동 추가 감지
+    if (/id="_ftn(?:ref)?\d+"[^>]*target\s*=/i.test(html)) {
+      issues.push('에디터가 앵커에 target 속성을 자동 추가함');
+    }
+
+    // href 변조 감지 (상대경로 → 절대경로 변환 등)
+    var hrefCheck = /id="_ftnref(\d+)"[^>]*href="([^"]*)"/g;
+    while ((m = hrefCheck.exec(html)) !== null) {
+      if (m[2] !== '#_ftn' + m[1]) {
+        issues.push('[' + m[1] + '] href 변조: ' + m[2]);
+      }
+    }
+
+    return {
+      refCount: refNums.size,
+      defCount: defNums.size,
+      issues: issues,
+      ok: issues.length === 0,
+    };
+  }
+
   // ─── 메시지 리스너 ───
 
   chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
@@ -761,6 +826,14 @@
       }
 
       var html = editorData.content;
+
+      // 마크다운 편집 모드 감지
+      if (isLikelyRawMarkdown(html)) {
+        return {
+          error: 'markdown_mode',
+          message: '마크다운 편집 모드가 감지되었습니다.\nHTML 편집 모드로 전환 후 다시 시도해주세요.\n\n(마크다운 모드에서 변환하면 HTML이 깨질 수 있습니다)',
+        };
+      }
 
       switch (message.action) {
         case 'scan': {
@@ -892,7 +965,12 @@
           }
 
           await setContent(newHtml);
-          return { success: true, number: num };
+
+          // 변환 후 검증: 에디터에 실제 반영된 내용 확인
+          var verifyData = await getContent();
+          var verification = verifyData ? verifyConversion(verifyData.content) : null;
+
+          return { success: true, number: num, verification: verification };
         }
 
         case 'convertAll': {
@@ -921,7 +999,12 @@
           }
 
           await setContent(allHtml);
-          return { success: true, count: totalCount };
+
+          // 변환 후 검증
+          var verifyData2 = await getContent();
+          var verification2 = verifyData2 ? verifyConversion(verifyData2.content) : null;
+
+          return { success: true, count: totalCount, verification: verification2 };
         }
 
         default:

@@ -28,6 +28,7 @@
     previewFoot: document.getElementById('preview-foot'),
     doneText: document.getElementById('done-text'),
     orphanWarning: document.getElementById('orphan-warning'),
+    verifyWarning: document.getElementById('verify-warning'),
   };
 
   // ─── 상태 ───
@@ -36,6 +37,7 @@
   var convertedCount = 0;
   var skippedCount = 0;
   var currentFormat = null;
+  var lastVerification = null;
 
   // ─── 형식 라벨 ───
   function formatLabel(format) {
@@ -73,10 +75,17 @@
     }
 
     return new Promise(function (resolve, reject) {
+      var timeout = setTimeout(function () {
+        reject(new Error('응답 시간 초과 (10초). 페이지를 새로고침 후 다시 시도해주세요.'));
+      }, 10000);
+
       chrome.tabs.sendMessage(tab.id, message, function (response) {
+        clearTimeout(timeout);
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
-        } else if (response && response.error) {
+        } else if (!response) {
+          reject(new Error('응답이 없습니다. 페이지를 새로고침 후 다시 시도해주세요.'));
+        } else if (response.error) {
           reject(new Error(response.message || response.error));
         } else {
           resolve(response);
@@ -178,11 +187,15 @@
     showView('loading');
     try {
       var result = await sendToContentScript({ action: 'convertAll' });
-      if (result.success) {
+      if (result && result.success) {
         var remaining = pairs.length - currentIndex;
         convertedCount += remaining;
         currentIndex = pairs.length;
+        lastVerification = result.verification || null;
         showDone();
+      } else {
+        els.errorText.textContent = '변환 응답이 올바르지 않습니다.';
+        showView('error');
       }
     } catch (err) {
       els.errorText.textContent = err.message;
@@ -199,10 +212,14 @@
         action: 'convertOne',
         number: pair.number,
       });
-      if (result.success) {
+      if (result && result.success) {
         convertedCount++;
         currentIndex++;
+        lastVerification = result.verification || null;
         showCurrentPair();
+      } else {
+        els.errorText.textContent = '변환 응답이 올바르지 않습니다.';
+        showView('error');
       }
     } catch (err) {
       els.errorText.textContent = err.message;
@@ -227,6 +244,23 @@
       parts.push(skippedCount + '개 건너뜀');
     }
     els.doneText.textContent = parts.length > 0 ? parts.join(', ') : '처리 완료';
+
+    // 검증 결과 표시
+    if (els.verifyWarning) {
+      if (lastVerification && !lastVerification.ok) {
+        els.verifyWarning.textContent = '⚠ 검증 경고: ' + lastVerification.issues.join('; ');
+        els.verifyWarning.classList.remove('hidden');
+      } else if (lastVerification && lastVerification.ok) {
+        els.verifyWarning.textContent = '✓ 검증 완료: ' + lastVerification.refCount + '개 앵커 정상';
+        els.verifyWarning.style.background = '#e8f5e9';
+        els.verifyWarning.style.borderColor = '#a5d6a7';
+        els.verifyWarning.style.color = '#2e7d32';
+        els.verifyWarning.classList.remove('hidden');
+      } else {
+        els.verifyWarning.classList.add('hidden');
+      }
+    }
+
     showView('done');
   }
 
