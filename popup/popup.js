@@ -11,6 +11,8 @@
     empty: document.getElementById('view-empty'),
     confirm: document.getElementById('view-confirm'),
     done: document.getElementById('view-done'),
+    mathConfirm: document.getElementById('view-math-confirm'),
+    mathDone: document.getElementById('view-math-done'),
   };
 
   var els = {
@@ -29,6 +31,20 @@
     doneText: document.getElementById('done-text'),
     orphanWarning: document.getElementById('orphan-warning'),
     verifyWarning: document.getElementById('verify-warning'),
+    btnMath: document.getElementById('btn-math'),
+    btnMathStart: document.getElementById('btn-math-start'),
+    btnMathAll: document.getElementById('btn-math-all'),
+    btnMathKeep: document.getElementById('btn-math-keep'),
+    btnMathEscape: document.getElementById('btn-math-escape'),
+    btnCloseMath: document.getElementById('btn-close-math'),
+    mathPrompt: document.getElementById('math-prompt'),
+    mathPromptText: document.getElementById('math-prompt-text'),
+    mathProgressText: document.getElementById('math-progress-text'),
+    mathPreviewContext: document.getElementById('math-preview-context'),
+    mathPreviewAuto: document.getElementById('math-preview-auto'),
+    mathDoneText: document.getElementById('math-done-text'),
+    mathDetail: document.getElementById('math-detail'),
+    mathVerify: document.getElementById('math-verify'),
   };
 
   // ─── 상태 ───
@@ -38,6 +54,9 @@
   var skippedCount = 0;
   var currentFormat = null;
   var lastVerification = null;
+  var mathDollarItems = [];
+  var mathCurrentIndex = 0;
+  var mathClassifications = [];
 
   // ─── 형식 라벨 ───
   function formatLabel(format) {
@@ -261,7 +280,136 @@
       }
     }
 
+    // 수식 자동 감지 초기화
+    if (els.mathPrompt) {
+      els.mathPrompt.classList.add('hidden');
+    }
+
     showView('done');
+
+    // 수식 자동 감지 (비동기)
+    sendToContentScript({ action: 'scanMath' }).then(function (result) {
+      if (result && result.hasMath && !result.alreadyHasMath) {
+        els.mathPromptText.textContent =
+          '수식($, $$) ' + result.mathCounts.total + '개 발견. MathJax를 주입할까요?';
+        els.mathPrompt.classList.remove('hidden');
+      }
+    }).catch(function () { /* 무시 */ });
+  }
+
+  // ─── 수식 처리 ───
+
+  async function handleMathScan() {
+    showView('loading');
+    try {
+      var result = await sendToContentScript({ action: 'scanMath' });
+
+      if (result.alreadyHasMath) {
+        els.emptyText.textContent = 'MathJax가 이미 포함되어 있습니다.';
+        showView('empty');
+        return;
+      }
+      if (!result.hasMath) {
+        els.emptyText.textContent = '수식 구분자($, $$)를 찾을 수 없습니다.';
+        showView('empty');
+        return;
+      }
+
+      mathDollarItems = result.dollarItems;
+      mathCurrentIndex = 0;
+      mathClassifications = [];
+
+      if (mathDollarItems.length === 0) {
+        handleMathApplyAll();
+        return;
+      }
+
+      showCurrentMathItem();
+    } catch (err) {
+      els.errorText.textContent = err.message;
+      showView('error');
+    }
+  }
+
+  function showCurrentMathItem() {
+    if (mathCurrentIndex >= mathDollarItems.length) {
+      handleMathApplyClassified();
+      return;
+    }
+
+    var item = mathDollarItems[mathCurrentIndex];
+    var remaining = mathDollarItems.length - mathCurrentIndex;
+
+    els.mathProgressText.textContent =
+      (mathCurrentIndex + 1) + '/' + mathDollarItems.length + '번째 $ 패턴';
+    els.mathPreviewContext.textContent = item.context;
+    els.mathPreviewAuto.textContent =
+      item.autoClassification === 'math' ? '수식 (자동 판정)' :
+      item.autoClassification === 'currency' ? '통화 (자동 판정)' : '판단 불가';
+    els.btnMathAll.textContent = '모두처리(' + remaining + '개)';
+
+    showView('mathConfirm');
+  }
+
+  async function handleMathApplyAll() {
+    showView('loading');
+    try {
+      var result = await sendToContentScript({ action: 'applyMathAll' });
+      if (result && result.success) {
+        showMathDone(result);
+      } else {
+        els.errorText.textContent = '수식 처리 응답이 올바르지 않습니다.';
+        showView('error');
+      }
+    } catch (err) {
+      els.errorText.textContent = err.message;
+      showView('error');
+    }
+  }
+
+  async function handleMathApplyClassified() {
+    showView('loading');
+    try {
+      var result = await sendToContentScript({
+        action: 'applyMath',
+        classifications: mathClassifications,
+      });
+      if (result && result.success) {
+        showMathDone(result);
+      } else {
+        els.errorText.textContent = '수식 처리 응답이 올바르지 않습니다.';
+        showView('error');
+      }
+    } catch (err) {
+      els.errorText.textContent = err.message;
+      showView('error');
+    }
+  }
+
+  function showMathDone(result) {
+    var parts = ['MathJax 부트스트랩 주입 완료'];
+    if (result.currencyEscaped > 0) {
+      parts.push('통화 ' + result.currencyEscaped + '개 이스케이프');
+    }
+    if (result.mathKept > 0) {
+      parts.push('수식 ' + result.mathKept + '개 유지');
+    }
+    els.mathDoneText.textContent = parts.join(', ');
+
+    if (els.mathVerify) {
+      if (result.verified) {
+        els.mathVerify.textContent = '✓ 삽입 확인 완료';
+        els.mathVerify.style.background = '#e8f5e9';
+        els.mathVerify.style.borderColor = '#a5d6a7';
+        els.mathVerify.style.color = '#2e7d32';
+        els.mathVerify.classList.remove('hidden');
+      } else {
+        els.mathVerify.textContent = '⚠ 삽입 확인 실패 — 페이지를 확인해주세요.';
+        els.mathVerify.classList.remove('hidden');
+      }
+    }
+
+    showView('mathDone');
   }
 
   // ─── 이벤트 바인딩 ───
@@ -272,4 +420,22 @@
   els.btnYes.addEventListener('click', handleConvertOne);
   els.btnNo.addEventListener('click', handleSkip);
   els.btnCloseDone.addEventListener('click', function () { window.close(); });
+
+  // 수식 이벤트
+  els.btnMath.addEventListener('click', handleMathScan);
+  els.btnMathStart.addEventListener('click', handleMathScan);
+  els.btnMathKeep.addEventListener('click', function () {
+    var item = mathDollarItems[mathCurrentIndex];
+    mathClassifications.push({ index: item.index, type: 'math' });
+    mathCurrentIndex++;
+    showCurrentMathItem();
+  });
+  els.btnMathEscape.addEventListener('click', function () {
+    var item = mathDollarItems[mathCurrentIndex];
+    mathClassifications.push({ index: item.index, type: 'currency' });
+    mathCurrentIndex++;
+    showCurrentMathItem();
+  });
+  els.btnMathAll.addEventListener('click', handleMathApplyAll);
+  els.btnCloseMath.addEventListener('click', function () { window.close(); });
 })();

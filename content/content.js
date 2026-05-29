@@ -765,6 +765,249 @@
     return mdIndicators >= 1;
   }
 
+  // ─── MathJax 부트스트랩 ───
+
+  var MATHJAX_BOOTSTRAP = '<script>\n' +
+    '(function(){\n' +
+    '  if(window.__mathjaxInjected)return;\n' +
+    '  window.__mathjaxInjected=true;\n' +
+    '  window.MathJax={\n' +
+    '    tex:{\n' +
+    '      inlineMath:[[\'$\',\'$\'],[\'\\\\(\',\'\\\\)\']],\n' +
+    '      displayMath:[[\'$$\',\'$$\'],[\'\\\\[\',\'\\\\]\']],\n' +
+    '      processEscapes:true,\n' +
+    '      tags:\'ams\'\n' +
+    '    },\n' +
+    '    options:{\n' +
+    '      skipHtmlTags:[\'script\',\'noscript\',\'style\',\'textarea\',\'pre\',\'code\']\n' +
+    '    }\n' +
+    '  };\n' +
+    '  var s=document.createElement(\'script\');\n' +
+    '  s.id=\'MathJax-script\';\n' +
+    '  s.async=true;\n' +
+    '  s.src=\'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js\';\n' +
+    '  document.head.appendChild(s);\n' +
+    '})();\n' +
+    '</script>';
+
+  function needsMath(html) {
+    var result = stripProtectedZones(html);
+    var cleaned = result.cleaned;
+    // Remove existing <script> tags
+    cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, '');
+    if (/\$\$[\s\S]+?\$\$/.test(cleaned)) return true;
+    if (/\$[^$\n]+?\$/.test(cleaned)) return true;
+    if (/\\\([\s\S]+?\\\)/.test(cleaned)) return true;
+    if (/\\\[[\s\S]+?\\\]/.test(cleaned)) return true;
+    return false;
+  }
+
+  function alreadyHasMath(html) {
+    if (/MathJax/i.test(html)) return true;
+    if (/katex/i.test(html)) return true;
+    if (/tex-mml-chtml/i.test(html)) return true;
+    if (/__mathjaxInjected/.test(html)) return true;
+    return false;
+  }
+
+  function looksLikeMath(content) {
+    if (/[\\^_{}]/.test(content)) return true;
+    var kw = /(?:frac|sqrt|sum|prod|int|lim|alpha|beta|gamma|delta|theta|lambda|sigma|pi|infty|partial|nabla|cdot|times|div|pm|leq|geq|neq|approx|equiv|sim|text|mathbb|overline|vec|dot|bar|begin|end|matrix)/i;
+    if (kw.test(content)) return true;
+    return false;
+  }
+
+  function countMathExpressions(html) {
+    var result = stripProtectedZones(html);
+    var cleaned = result.cleaned;
+    cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, '');
+    var display = (cleaned.match(/\$\$[\s\S]+?\$\$/g) || []).length;
+    var temp = cleaned.replace(/\$\$[\s\S]+?\$\$/g, '');
+    var inline = 0;
+    var re = /\$([^$\n]+?)\$/g;
+    var m;
+    while ((m = re.exec(temp)) !== null) {
+      if (looksLikeMath(m[1])) inline++;
+    }
+    return { display: display, inline: inline, total: display + inline };
+  }
+
+  function escapeCurrencyDollars(html) {
+    var result = stripProtectedZones(html);
+    var text = result.cleaned;
+    var zones = result.zones;
+    var escapeCount = 0;
+
+    // Protect existing <script> tags
+    var scriptZones = [];
+    var szIdx = 0;
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, function (m) {
+      var ph = '\x00SZ' + (szIdx++) + '\x00';
+      scriptZones.push({ ph: ph, content: m });
+      return ph;
+    });
+
+    // Pass 1: Protect $$...$$ display math
+    var mathZones = [];
+    var mzIdx = 0;
+    text = text.replace(/\$\$([\s\S]+?)\$\$/g, function (m) {
+      var ph = '\x00MZ' + (mzIdx++) + '\x00';
+      mathZones.push({ ph: ph, content: m });
+      return ph;
+    });
+
+    // Pass 2: Protect $...$ inline math with LaTeX indicators
+    text = text.replace(/\$([^$\n]+?)\$/g, function (match, content) {
+      if (looksLikeMath(content)) {
+        var ph = '\x00MZ' + (mzIdx++) + '\x00';
+        mathZones.push({ ph: ph, content: match });
+        return ph;
+      }
+      return match;
+    });
+
+    // Pass 3: Escape remaining $ followed by digit (currency)
+    text = text.replace(/(?<!\\)\$(?=\d)/g, function () {
+      escapeCount++;
+      return '\\$';
+    });
+
+    // Restore (reverse order)
+    for (var i = 0; i < mathZones.length; i++) {
+      text = text.split(mathZones[i].ph).join(mathZones[i].content);
+    }
+    for (var j = 0; j < scriptZones.length; j++) {
+      text = text.split(scriptZones[j].ph).join(scriptZones[j].content);
+    }
+    text = restoreProtectedZones(text, zones);
+
+    return { escaped: text, escapeCount: escapeCount };
+  }
+
+  function findAmbiguousDollars(html) {
+    var result = stripProtectedZones(html);
+    var text = result.cleaned;
+
+    // Remove <script> tags
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
+
+    // Remove $$...$$ (always math)
+    text = text.replace(/\$\$([\s\S]+?)\$\$/g, function (m) {
+      return '\x00DD' + '\x00'.repeat(m.length - 4) + '\x00DD\x00';
+    });
+
+    // Remove confirmed math $...$ (LaTeX indicators)
+    text = text.replace(/\$([^$\n]+?)\$/g, function (match, content) {
+      if (looksLikeMath(content)) {
+        return '\x00IM' + '\x00'.repeat(match.length - 4) + '\x00IM\x00';
+      }
+      return match;
+    });
+
+    // Find remaining $ patterns
+    var items = [];
+    var re = /(?<!\\)\$/g;
+    var m;
+    var dollarPositions = [];
+    while ((m = re.exec(text)) !== null) {
+      dollarPositions.push(m.index);
+    }
+
+    for (var i = 0; i < dollarPositions.length; i++) {
+      var pos = dollarPositions[i];
+      var start = Math.max(0, pos - 30);
+      var end = Math.min(text.length, pos + 31);
+      var context = text.substring(start, end).replace(/<[^>]*>/g, '').replace(/\x00[A-Z]*\x00/g, '').trim();
+
+      // Auto-classify
+      var after = text.substring(pos + 1, Math.min(text.length, pos + 20));
+      var autoClass = 'ambiguous';
+      if (/^\d/.test(after)) {
+        autoClass = 'currency';
+      }
+
+      items.push({
+        index: pos,
+        context: context,
+        autoClassification: autoClass,
+      });
+    }
+
+    return items;
+  }
+
+  function applyDollarClassifications(html, classifications) {
+    if (!classifications || classifications.length === 0) return html;
+
+    var result = stripProtectedZones(html);
+    var text = result.cleaned;
+    var zones = result.zones;
+
+    // Build set of positions to escape
+    var escapePositions = new Set();
+    for (var i = 0; i < classifications.length; i++) {
+      if (classifications[i].type === 'currency') {
+        escapePositions.add(classifications[i].index);
+      }
+    }
+
+    // Remove <script> to recalculate positions consistently
+    var scriptZones = [];
+    var szIdx = 0;
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, function (m) {
+      var ph = '\x00SZ' + (szIdx++) + '\x00';
+      scriptZones.push({ ph: ph, content: m });
+      return ph;
+    });
+
+    // Remove $$...$$
+    var mathZones = [];
+    var mzIdx = 0;
+    text = text.replace(/\$\$([\s\S]+?)\$\$/g, function (m) {
+      var ph = '\x00MZ' + (mzIdx++) + '\x00';
+      mathZones.push({ ph: ph, content: m });
+      return ph;
+    });
+
+    // Remove confirmed math $...$
+    text = text.replace(/\$([^$\n]+?)\$/g, function (match, content) {
+      if (looksLikeMath(content)) {
+        var ph = '\x00MZ' + (mzIdx++) + '\x00';
+        mathZones.push({ ph: ph, content: match });
+        return ph;
+      }
+      return match;
+    });
+
+    // Replace $ at classified positions
+    var chars = text.split('');
+    var re = /(?<!\\)\$/g;
+    var m;
+    var matches = [];
+    while ((m = re.exec(text)) !== null) {
+      matches.push(m.index);
+    }
+
+    // Map remaining $ positions to classification indices
+    for (var ci = 0; ci < matches.length; ci++) {
+      if (escapePositions.has(matches[ci])) {
+        chars[matches[ci]] = '\\$';
+      }
+    }
+    text = chars.join('');
+
+    // Restore
+    for (var ri = 0; ri < mathZones.length; ri++) {
+      text = text.split(mathZones[ri].ph).join(mathZones[ri].content);
+    }
+    for (var si = 0; si < scriptZones.length; si++) {
+      text = text.split(scriptZones[si].ph).join(scriptZones[si].content);
+    }
+    text = restoreProtectedZones(text, zones);
+
+    return text;
+  }
+
   // ─── 변환 결과 검증 ───
 
   function verifyConversion(html) {
@@ -1005,6 +1248,67 @@
           var verification2 = verifyData2 ? verifyConversion(verifyData2.content) : null;
 
           return { success: true, count: totalCount, verification: verification2 };
+        }
+
+        case 'scanMath': {
+          var hasMath = needsMath(html);
+          var already = alreadyHasMath(html);
+          var mathCounts = hasMath ? countMathExpressions(html) : { display: 0, inline: 0, total: 0 };
+
+          var dollarItems = [];
+          if (hasMath && !already) {
+            dollarItems = findAmbiguousDollars(html);
+          }
+
+          return {
+            hasMath: hasMath,
+            alreadyHasMath: already,
+            mathCounts: mathCounts,
+            dollarItems: dollarItems,
+          };
+        }
+
+        case 'applyMath': {
+          var classifications = message.classifications || [];
+
+          var newMathHtml = applyDollarClassifications(html, classifications);
+
+          if (!alreadyHasMath(newMathHtml)) {
+            newMathHtml = MATHJAX_BOOTSTRAP + '\n' + newMathHtml;
+          }
+
+          await setContent(newMathHtml);
+
+          var mathVerifyData = await getContent();
+          var mathVerified = mathVerifyData ? alreadyHasMath(mathVerifyData.content) : false;
+
+          return {
+            success: true,
+            verified: mathVerified,
+            currencyEscaped: classifications.filter(function (c) { return c.type === 'currency'; }).length,
+            mathKept: classifications.filter(function (c) { return c.type === 'math'; }).length,
+          };
+        }
+
+        case 'applyMathAll': {
+          var escResult = escapeCurrencyDollars(html);
+          var mathAllHtml = escResult.escaped;
+
+          if (!alreadyHasMath(mathAllHtml)) {
+            mathAllHtml = MATHJAX_BOOTSTRAP + '\n' + mathAllHtml;
+          }
+
+          await setContent(mathAllHtml);
+
+          var mathAllVerify = await getContent();
+          var mathAllVerified = mathAllVerify ? alreadyHasMath(mathAllVerify.content) : false;
+
+          return {
+            success: true,
+            verified: mathAllVerified,
+            currencyEscaped: escResult.escapeCount,
+            mathCounts: countMathExpressions(mathAllHtml),
+          };
         }
 
         default:

@@ -11,7 +11,10 @@
     <!-- 초기 상태: 스캔 버튼 -->
     <div id="view-scan" class="view">
       <p class="desc">티스토리 HTML 편집 모드에서 아래 버튼을 눌러주세요.<br>각주를 찾아 양방향 링크를 부여합니다.</p>
-      <button id="btn-scan" class="btn btn-primary">각주 스캔</button>
+      <button id="btn-scan" class="btn btn-primary btn-full">각주 스캔</button>
+      <hr class="divider">
+      <p class="desc desc-sub">수식($, $$)이 포함된 글에 MathJax를 주입합니다.</p>
+      <button id="btn-math" class="btn btn-math">수식 부트스트랩 주입</button>
     </div>
 
     <!-- 스캔 중 -->
@@ -56,7 +59,39 @@
     <div id="view-done" class="view hidden">
       <p class="success-msg" id="done-text"></p>
       <div id="verify-warning" class="orphan-warning hidden"></div>
+      <div id="math-prompt" class="math-prompt hidden">
+        <hr class="divider">
+        <p class="desc desc-sub" id="math-prompt-text"></p>
+        <button id="btn-math-start" class="btn btn-math">수식 처리 시작</button>
+      </div>
       <button id="btn-close-done" class="btn btn-secondary">닫기</button>
+    </div>
+
+    <!-- 수식 $ 분류 확인 -->
+    <div id="view-math-confirm" class="view hidden">
+      <div class="progress-bar">
+        <span id="math-progress-text"></span>
+      </div>
+      <div class="preview-box">
+        <div class="preview-label">컨텍스트:</div>
+        <div class="preview-content" id="math-preview-context"></div>
+        <div class="preview-label">자동 판정:</div>
+        <div class="preview-content" id="math-preview-auto"></div>
+      </div>
+      <p class="confirm-question">이 $는 무엇인가요?</p>
+      <div class="btn-group">
+        <button id="btn-math-all" class="btn btn-primary"></button>
+        <button id="btn-math-keep" class="btn btn-success">수식</button>
+        <button id="btn-math-escape" class="btn btn-secondary">통화</button>
+      </div>
+    </div>
+
+    <!-- 수식 완료 -->
+    <div id="view-math-done" class="view hidden">
+      <p class="success-msg" id="math-done-text"></p>
+      <div id="math-detail" class="preview-box hidden"></div>
+      <div id="math-verify" class="orphan-warning hidden"></div>
+      <button id="btn-close-math" class="btn btn-secondary">닫기</button>
     </div>
   </div>
 
