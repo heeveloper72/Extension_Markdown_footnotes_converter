@@ -913,11 +913,16 @@
       dollarPositions.push(m.index);
     }
 
+    var stripTags = function (s) {
+      return s.replace(/<[^>]*>/g, '').replace(/\x00[A-Z]*\x00/g, '');
+    };
+
     for (var i = 0; i < dollarPositions.length; i++) {
       var pos = dollarPositions[i];
       var start = Math.max(0, pos - 30);
       var end = Math.min(text.length, pos + 31);
-      var context = text.substring(start, end).replace(/<[^>]*>/g, '').replace(/\x00[A-Z]*\x00/g, '').trim();
+      var contextBefore = stripTags(text.substring(start, pos));
+      var contextAfter = stripTags(text.substring(pos + 1, end));
 
       // Auto-classify
       var after = text.substring(pos + 1, Math.min(text.length, pos + 20));
@@ -928,7 +933,8 @@
 
       items.push({
         index: pos,
-        context: context,
+        contextBefore: contextBefore,
+        contextAfter: contextAfter,
         autoClassification: autoClass,
       });
     }

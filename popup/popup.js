@@ -331,6 +331,10 @@
     }
   }
 
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   function showCurrentMathItem() {
     if (mathCurrentIndex >= mathDollarItems.length) {
       handleMathApplyClassified();
@@ -342,7 +346,10 @@
 
     els.mathProgressText.textContent =
       (mathCurrentIndex + 1) + '/' + mathDollarItems.length + '번째 $ 패턴';
-    els.mathPreviewContext.textContent = item.context;
+    els.mathPreviewContext.innerHTML =
+      escapeHtml(item.contextBefore) +
+      '<mark class="math-highlight">$</mark>' +
+      escapeHtml(item.contextAfter);
     els.mathPreviewAuto.textContent =
       item.autoClassification === 'math' ? '수식 (자동 판정)' :
       item.autoClassification === 'currency' ? '통화 (자동 판정)' : '판단 불가';

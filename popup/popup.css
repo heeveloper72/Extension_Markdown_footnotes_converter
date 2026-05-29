@@ -252,3 +252,12 @@ h1 {
 .math-prompt {
   margin-top: 4px;
 }
+
+/* $ 하이라이트 */
+.math-highlight {
+  background: #ffeb3b;
+  color: #d32f2f;
+  font-weight: 700;
+  padding: 0 2px;
+  border-radius: 2px;
+}
